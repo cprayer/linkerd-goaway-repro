@@ -1,0 +1,18 @@
+{
+  "cluster": "linkerd-goaway-repro",
+  "node_image": "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5",
+  "linkerd": "edge-26.8.2",
+  "gateway_api": "v1.2.1",
+  "gateway_api_sha256": "97598bf6ab3b33b9b5c5432bdd24de091e4e9c3aa0575ebb0710a2a19cd64d64",
+  "proxy_repository": "https://github.com/cprayer/linkerd2-proxy.git",
+  "baseline": "e5de317dfe0feb8f6ff06f07c4e8ec9f61ab7a8f",
+  "patched": "befe99fa0c16362afe67193980f854d7b115ee24",
+  "rust_image": "rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c",
+  "proxy_image": "cr.l5d.io/linkerd/proxy:edge-26.8.2@sha256:0763e0e8bc144a86326fd1d29701b5ae31ddc6569870ef130a6f08142a253d34",
+  "linkerd_cli_sha256": {
+    "darwin": "67599ab801a955b43516717c753f6d0d6a83776925d7278e71bef02671713cf0",
+    "darwin-arm64": "68b54588d518a26b048e721faa23c9c23f379a75172074c03372340f00f638b3",
+    "linux-amd64": "190e81584bd46d342c1fd63659495b700a5b5254865820d3b8e120aeaa288b16",
+    "linux-arm64": "e0bd2249b37feff24035132bfc27c681fb201e95021d3ca26794492673e618e6"
+  }
+}

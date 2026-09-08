@@ -1,0 +1,26 @@
+[
+  {
+    "id": "sha256:63d5b14799f75d7284d43ad11050b0d1d9019c8ddfc93c465a6ab97430904ab0",
+    "tags": [
+      "localhost/linkerd-goaway-proxy:e5de317dfe0f"
+    ]
+  },
+  {
+    "id": "sha256:180b168decd92c7f0986bcc980c3fd2831d45e75c68477a074c6c790d1a859d0",
+    "tags": [
+      "localhost/linkerd-goaway-proxy:befe99fa0c16"
+    ]
+  },
+  {
+    "id": "sha256:b42c44c1e88fdc0f9bd88a2bb1300300ea0a7f9225d3073b44bbd6b4a0bd2de9",
+    "tags": [
+      "localhost/linkerd-goaway-server:repro"
+    ]
+  },
+  {
+    "id": "sha256:fffbe19672a6e64138125c57aab4e3d3ecd8e59906a5350ff812eb669878d04b",
+    "tags": [
+      "localhost/linkerd-goaway-client:repro"
+    ]
+  }
+]
