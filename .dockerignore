@@ -3,6 +3,8 @@
 !versions.json
 !harness/
 !harness/goaway.rs
+!patches/
+!patches/replay-unpolled-body.patch
 !scripts/
 !scripts/reproduce.py
 !scripts/standalone.py

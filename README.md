@@ -1,92 +1,59 @@
 # Linkerd GOAWAY reproduction
 
-Compare direct calls with baseline and patched Linkerd proxies using simple Go or Java echo applications.
-The server's gRPC library sends GOAWAY after five seconds and responds after thirty seconds; each case runs twenty staggered RPCs.
+Reproduces gRPC request failures when Linkerd receives HTTP/2 GOAWAY while requests are in flight.
+
+The baseline proxy uses [`e5de317d`](https://github.com/cprayer/linkerd2-proxy/commit/e5de317dfe0feb8f6ff06f07c4e8ec9f61ab7a8f). The patched proxy uses [`f0323303`](https://github.com/cprayer/linkerd2-proxy/commit/f032330383015831f8cc9f0bd1e185c8db7fd697). Both include the same [ReplayBody fix](patches/replay-unpolled-body.patch), so the comparison isolates the GOAWAY change.
 
 ## Run
 
-Docker is the only prerequisite. The first build compiles both proxy revisions and the client/server from source.
-The builder and reproduction container are each limited to **2 CPUs and 4 GiB RAM**, with swap disabled.
-The builder can be shared with `linkerd-replay-body-repro`.
+Docker is the only prerequisite. Each run uses the same language for its client and server.
 
 ```sh
-docker buildx inspect linkerd-replay-builder >/dev/null 2>&1 || \
-  docker buildx create --name linkerd-replay-builder --driver docker-container
-docker buildx inspect --bootstrap linkerd-replay-builder
-docker update --cpus 2 --memory 4g --memory-swap 4g buildx_buildkit_linkerd-replay-builder0
-docker buildx build --builder linkerd-replay-builder --load -t linkerd-goaway-repro \
-  https://github.com/cprayer/linkerd-goaway-repro.git
-docker run -d --name goaway-repro --cpus 2 --memory 4g --memory-swap 4g linkerd-goaway-repro --runs 5
-docker logs -f goaway-repro
+docker build -t linkerd-goaway-repro https://github.com/cprayer/linkerd-goaway-repro.git
+
+docker run -d --name goaway-java --cpus 2 --memory 4g --memory-swap 4g \
+  linkerd-goaway-repro --runs 5 --language java
+docker run -d --name goaway-go --cpus 2 --memory 4g --memory-swap 4g \
+  linkerd-goaway-repro --runs 5 --language go
+
+docker logs -f goaway-java
+docker logs -f goaway-go
 ```
 
-The container runs as a non-root user, without mounts or privileged mode. All traffic stays inside the container.
+The containers run as a non-root user, without mounts or privileged mode. The proxy, client, and server communicate only inside each container.
 
-The proxies use Linkerd's integration harness with local test controllers and identities. This tests the proxy behavior; it does not run Kubernetes, iptables, or service mirroring.
+## Expected results
 
-Choose either language with `--client java|go` and `--server go|java` (default: Java client → Go server).
-For example, append `--client go --server java` to the `docker run` command for Go → Java.
+Each client first calls its server directly, then through baseline and patched Linkerd proxies.
 
-## Check the result
-
-The same client and server first run **without Linkerd**, then through the baseline and patched proxies.
-Each client makes one unary echo call; the server returns the received message unchanged.
-
-| Language | Echo client | Echo server |
+| Client and server | Baseline | Patched |
 |---|---|---|
-| Java | [GoAwayClient.java](client/src/main/java/repro/GoAwayClient.java) | [GoAwayServer.java](client/src/main/java/repro/GoAwayServer.java) |
-| Go | [client.go](server/echo/client.go) | [main.go](server/main.go) |
+| Java | Some RPCs fail with `INTERNAL` | All RPCs succeed through transparent retries |
+| Go | Some RPCs fail with `INTERNAL` | All RPCs succeed through transparent retries |
 
-The [Java runner](client/src/main/java/repro/Reproduce.java) and [Go runner](server/cmd/client/main.go)
-handle staggered calls and log gRPC's tracing callbacks. They do not implement retries or HTTP/2 frames.
-`RPC` shows the actual call result; `STREAM_CLOSED` and `ATTEMPT` show stream status and transparent retries.
-These are client-side logs. Raw Linkerd logs are saved separately in the results.
-
-Example excerpts from a run (RPC IDs and failure counts vary):
+Selected lines from actual baseline and patched Go client logs:
 
 ```text
-Running baseline-one
-RPC id=5 code=INTERNAL attempts=1 error=io.grpc.StatusRuntimeException: INTERNAL: unexpected error
-Running patched-one
-RPC id=5 code=OK attempts=2
+RPC id=5 code=INTERNAL attempts=1 error=rpc error: code = Internal desc = unexpected error
+SUMMARY {"attempts":20,"completed":true,"disableRetry":false,"failed":3,"requests":20,"success":17,"transparentRetries":0}
+
+STREAM_CLOSED time=2026-09-12T07:34:41.021754961Z id=5 attempt=1 code=UNAVAILABLE description=stream terminated by RST_STREAM with error code: REFUSED_STREAM
+ATTEMPT time=2026-09-12T07:34:41.021794794Z id=5 attempt=2 transparent=true
+RPC id=5 code=OK attempts=2 error=<nil>
+SUMMARY {"attempts":23,"completed":true,"disableRetry":false,"failed":0,"requests":20,"success":20,"transparentRetries":3}
 ```
 
-| Configuration | Result |
-|---|---|
-| Direct, without Linkerd | All 20 RPCs succeed without retries |
-| Baseline, one or two proxies | Some RPCs fail with `INTERNAL` |
-| Patched, one or two proxies | All RPCs succeed through transparent retries |
-| Patched, client retries disabled, one or two proxies | Some RPCs fail with `UNAVAILABLE` / `REFUSED_STREAM` |
-| Patched, client retries disabled, Linkerd route retry enabled | All RPCs succeed through Linkerd retries |
+RPC IDs and failure counts vary between runs. Java also checks retry-disabled and Linkerd route-retry cases; Go checks the baseline and patched cases because grpc-go cannot disable transparent retries.
 
-**PASS means direct calls succeeded, the bug was reproduced before the fix, and all selected checks passed in every run.**
-Checks cover RPC outcomes, matching retry/refusal IDs, metrics, mTLS on two-proxy paths, and unexpected process exits.
-A baseline without failures fails verification. A failed run stops the batch and exits nonzero; failures are not retried.
-The Java client runs all seven proxy cases. The Go client runs the four baseline/patched cases:
-Go's `WithDisableRetry` does not disable transparent retries, so the Java-only retry-disabled cases are excluded.
-Use `--runs 1` for a single run; allow about seven minutes for Java or five minutes for Go.
-
-The pinned proxy also has the separate [ReplayBody duplication bug](https://github.com/cprayer/linkerd-replay-body-repro).
-With a Java server, the `patched-policy` case can fail with `INTERNAL: Too many requests`:
-the gRPC library rejects a second message in a unary request. This is reported as a failure, not a successful GOAWAY fix.
-
-Copy the results to inspect summaries, client/server logs, proxy logs, and metrics:
+Logs, metrics, and `summary.json` are saved under `/results`. Copy them from either container:
 
 ```sh
-docker cp goaway-repro:/results ./results
+docker cp goaway-java:/results ./results-java
+docker cp goaway-go:/results ./results-go
 ```
 
-Open the latest directory's **report.md**, then follow a run's **details** link to its checks and raw logs.
-To repeat using the same container: `docker start -a goaway-repro`.
-Remove the stopped container with `docker rm goaway-repro` when finished.
+The original Kubernetes runner remains available with `make reproduce`.
 
-## Kubernetes reproduction
+## License
 
-The original `make reproduce` runner remains available for kind; it requires kind, kubectl, Git, Python, Make, and Docker. That path uses privileged kind nodes and build mounts. `make clean` deletes its recorded cluster.
-
-A prior kind run is recorded in [validation/report.md](validation/report.md). [versions.json](versions.json) pins proxy revisions and build inputs; see [client/pom.xml](client/pom.xml) and [server/go.mod](server/go.mod) for application dependencies.
-
-Both languages use [proto/echo.proto](proto/echo.proto). Go service bindings in [server/rpc/](server/rpc/)
-are generated by `protoc-gen-go-grpc v1.5.1`.
-
-Licensed under [Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE)

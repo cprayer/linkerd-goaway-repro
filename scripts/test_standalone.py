@@ -11,6 +11,16 @@ import standalone
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_evidence_shows_the_observed_failure_and_retry(self):
+        result = dict(requests=20, success=20, failed=0, transparentRetries=3)
+        baseline = "RPC id=6 code=INTERNAL attempts=1 error=rpc error: code = Internal desc = unexpected error\n"
+        patched = ("ATTEMPT time=t id=5 attempt=2 transparent=true\n"
+                   "RPC id=5 code=OK attempts=2\n")
+        self.assertEqual(standalone.evidence("baseline-one", result, baseline),
+                         'GOAWAY baseline-one RPC 6 FINAL INTERNAL attempts=1 error="unexpected error"')
+        self.assertEqual(standalone.evidence("patched-one", result, patched),
+                         "GOAWAY patched-one RPC 5 REFUSED_STREAM -> transparent retry -> OK attempts=2")
+
     def test_shared_verifier_requires_retry_ids_and_mtls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -86,8 +96,8 @@ class StandaloneTests(unittest.TestCase):
                 patch.object(reproduce, "RESULTS", reproduce.RESULTS), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             root = Path(directory) / "run"
-            self.assertEqual(standalone.execute(root, "go", "java"), 1)
-            scenario.assert_called_once_with("direct", "direct", False, root, "go", "java")
+            self.assertEqual(standalone.execute(root, "go"), 1)
+            scenario.assert_called_once_with("direct", "direct", False, root, "go")
             verify.assert_not_called()
             self.assertIn("Direct calls failed", (root / "error.txt").read_text())
 

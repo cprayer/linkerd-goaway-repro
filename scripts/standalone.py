@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import io
 import json
 from pathlib import Path
 import re
@@ -13,6 +14,19 @@ import time
 import urllib.request
 
 import reproduce
+
+
+def evidence(name, result, log):
+    if name.startswith("baseline-"):
+        match = re.search(r"^RPC id=(\d+) code=INTERNAL attempts=(\d+) error=.*unexpected error$", log, re.M)
+        if match:
+            return f'GOAWAY {name} RPC {match[1]} FINAL INTERNAL attempts={match[2]} error="unexpected error"'
+    elif name in ("patched-one", "patched-two"):
+        match = re.search(r"^ATTEMPT .* id=(\d+) attempt=2 transparent=true$", log, re.M)
+        if match and re.search(rf"^RPC id={match[1]} code=OK attempts=2(?: |$)", log, re.M):
+            return f"GOAWAY {name} RPC {match[1]} REFUSED_STREAM -> transparent retry -> OK attempts=2"
+    return (f"GOAWAY {name} requests={result['requests']} success={result['success']} "
+            f"failed={result['failed']} transparent_retries={result['transparentRetries']}")
 
 
 def wait_for(check, processes, timeout):
@@ -36,7 +50,7 @@ def listening(port):
         return False
 
 
-def scenario(name, variant, disabled, directory, client="java", server="go"):
+def scenario(name, variant, disabled, directory, language="java"):
     processes = []
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -51,7 +65,7 @@ def scenario(name, variant, disabled, directory, client="java", server="go"):
 
         try:
             java = ["java", "-XX:ActiveProcessorCount=2", "-Xms32m", "-Xmx128m", "-cp", "/app/client.jar"]
-            server_command = (["goaway-server", "-port", str(port)] if server == "go" else
+            server_command = (["goaway-server", "-port", str(port)] if language == "go" else
                               java + ["repro.GoAwayServer", str(port)])
             start(server_command, name + "-server.log")
             wait_for(lambda: listening(port), processes, 30)
@@ -61,12 +75,9 @@ def scenario(name, variant, disabled, directory, client="java", server="go"):
                 wait_for(ready.is_file, processes, 30)
                 addresses = json.loads(ready.read_text())
             client_log = directory / (name + ".log")
-            client_command = ["goaway-client"] if client == "go" else java + ["repro.Reproduce"]
+            client_command = ["goaway-client"] if language == "go" else java + ["repro.Reproduce"]
             start(client_command + [addresses["outbound"], str(disabled).lower()], client_log.name)
             match = wait_for(lambda: re.search(r"^SUMMARY (.+)$", client_log.read_text(), re.M), processes, 150)
-            for line in client_log.read_text().splitlines():
-                if line.startswith(("START ", "ATTEMPT ", "STREAM_CLOSED ", "RPC ", "SUMMARY ")):
-                    print(line, flush=True)
             if variant != "direct":
                 with urllib.request.urlopen("http://" + addresses["admin"] + "/metrics", timeout=10) as response:
                     (directory / (name + ".prom")).write_bytes(response.read())
@@ -86,29 +97,33 @@ def interrupt(_signum, _frame):
     raise KeyboardInterrupt
 
 
-def execute(directory, client="java", server="go"):
+def execute(directory, language="java"):
     directory.mkdir()
     reproduce.RESULTS = directory
     summaries, authorities, proxy_logs = {}, {}, {}
     print("Results: " + str(directory), flush=True)
-    cases = reproduce.CASES if client == "java" else reproduce.CASES[:4]
+    cases = reproduce.CASES if language == "java" else reproduce.CASES[:4]
     try:
-        print(f"Running direct ({client} client -> {server} server)", flush=True)
-        direct, _ = scenario("direct", "direct", False, directory, client, server)
+        print(f"Running direct ({language} client -> {language} server)", flush=True)
+        direct, _ = scenario("direct", "direct", False, directory, language)
         if not (direct["completed"] and direct["requests"] == direct["success"] == direct["attempts"] == 20
                 and direct["failed"] == direct["transparentRetries"] == 0):
             raise RuntimeError("Direct calls failed or retried; inspect direct.log and direct-server.log")
+        print(f"DIRECT {language}->{language} requests=20 success=20 retries=0", flush=True)
         for name, variant, _server, disabled, _policy in cases:
             print("Running " + name, flush=True)
-            summaries[name], authorities[name] = scenario(name, variant, disabled, directory, client, server)
+            summaries[name], authorities[name] = scenario(name, variant, disabled, directory, language)
             proxy_logs[name] = (directory / (name + "-proxy.log")).read_text()
-        reproduce.verify(summaries, proxy_logs, authorities, cases)
+        with contextlib.redirect_stdout(io.StringIO()):
+            reproduce.verify(summaries, proxy_logs, authorities, cases)
+        for name in ("baseline-one", "patched-one"):
+            print(evidence(name, summaries[name], (directory / (name + ".log")).read_text()), flush=True)
         summary_path = directory / "summary.json"
         summary = json.loads(summary_path.read_text())
-        summary.update(client=client, server=server, direct=direct)
+        summary.update(language=language, direct=direct)
         summary_path.write_text(json.dumps(summary, indent=2) + "\n")
         with (directory / "report.md").open("a") as report:
-            report.write(f"\nClient: {client}; server: {server}. Direct: 20/20 successful RPCs, no retries.\n")
+            report.write(f"\nLanguage: {language}. Direct: 20/20 successful RPCs, no retries.\n")
             report.write("\n| Case | Client | Server | Proxy | Metrics |\n|---|---|---|---|---|\n")
             report.write("| direct | [log](direct.log) | [log](direct-server.log) | — | — |\n")
             for name, *_ in cases:
@@ -131,8 +146,7 @@ def positive(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=positive, default=5)
-    parser.add_argument("--client", choices=("java", "go"), default="java")
-    parser.add_argument("--server", choices=("go", "java"), default="go")
+    parser.add_argument("--language", choices=("java", "go"), default="java")
     parser.add_argument("--results", type=Path, default=Path("/results"))
     args = parser.parse_args()
     directory = args.results / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + str(time.time_ns()))
@@ -142,12 +156,20 @@ def main():
     for index in range(1, args.runs + 1):
         name = f"run-{index:03d}"
         print(f"Run {index}/{args.runs}", flush=True)
-        code = execute(directory / name, args.client, args.server)
+        code = execute(directory / name, args.language)
         status = "FAIL" if code else "PASS"
         target = "error.txt" if code else "report.md"
         rows.append(f"| {index} | {status} | [details]({name}/{target}) |")
         (directory / "report.md").write_text("\n".join(rows) + "\n")
-        print(f"{status}: run {index}/{args.runs}; results: {directory / 'report.md'}", flush=True)
+        summary = directory / name / "summary.json"
+        if summary.exists():
+            cases = json.loads(summary.read_text())["cases"]
+            baseline = sum(cases[name]["failed"] for name in ("baseline-one", "baseline-two"))
+            patched = sum(cases[name]["failed"] for name in ("patched-one", "patched-two"))
+            comparison = f" baseline failures={baseline} -> patched failures={patched} ->"
+        else:
+            comparison = ""
+        print(f"RUN {index}/{args.runs}{comparison} {status}", flush=True)
         if code:
             return code
     print(f"PASS: {args.runs}/{args.runs} runs; all selected checks matched in each run", flush=True)

@@ -13,23 +13,28 @@ RUN test -z "$(gofmt -l .)" && GOMAXPROCS=2 go test -p 2 ./... \
     && CGO_ENABLED=0 GOMAXPROCS=2 go build -p 2 -trimpath -o /server . \
     && CGO_ENABLED=0 GOMAXPROCS=2 go build -p 2 -trimpath -o /client ./cmd/client
 
-FROM rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS baseline
+FROM rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS proxy-source
 WORKDIR /src
 RUN git init . \
     && git fetch --depth=1 https://github.com/cprayer/linkerd2-proxy.git e5de317dfe0feb8f6ff06f07c4e8ec9f61ab7a8f \
     && git checkout --detach FETCH_HEAD
 COPY harness/goaway.rs linkerd/app/integration/examples/goaway.rs
+COPY patches/replay-unpolled-body.patch /replay.patch
 ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-    RUSTFLAGS="-D warnings -D deprecated --cfg tokio_unstable -C debuginfo=0" \
-    LINKERD2_PROXY_VERSION=0.0.0-goaway.e5de317dfe0f LINKERD2_PROXY_VENDOR=goaway-repro
-RUN cargo build --release --locked -p linkerd-app-integration --example goaway \
+    RUSTFLAGS="-D warnings -D deprecated --cfg tokio_unstable -C debuginfo=0" LINKERD2_PROXY_VENDOR=goaway-repro
+
+FROM proxy-source AS baseline
+ENV LINKERD2_PROXY_VERSION=0.0.0-goaway.e5de317dfe0f-replayfix
+RUN git apply --check /replay.patch && git apply /replay.patch \
+    && cargo build --release --locked -p linkerd-app-integration --example goaway \
     && cp target/release/examples/goaway /goaway-baseline && strip /goaway-baseline
 
-FROM baseline AS patched
+FROM proxy-source AS patched
 RUN git fetch --depth=1 https://github.com/cprayer/linkerd2-proxy.git f032330383015831f8cc9f0bd1e185c8db7fd697 \
     && git checkout --detach FETCH_HEAD
-ENV LINKERD2_PROXY_VERSION=0.0.0-goaway.f03233038301
-RUN cargo build --release --locked -p linkerd-app-integration --example goaway \
+ENV LINKERD2_PROXY_VERSION=0.0.0-goaway.f03233038301-replayfix
+RUN git apply --check /replay.patch && git apply /replay.patch \
+    && cargo build --release --locked -p linkerd-app-integration --example goaway \
     && cp target/release/examples/goaway /goaway-patched && strip /goaway-patched
 
 FROM eclipse-temurin:17-jre@sha256:13cc28a6cc72a38ce1f00c906be3580c1a3e604b8984d694f369a96742abc93b AS java
@@ -43,7 +48,7 @@ COPY --from=server /server /usr/local/bin/goaway-server
 COPY --from=server /client /usr/local/bin/goaway-client
 COPY --from=baseline /goaway-baseline /usr/local/bin/goaway-baseline
 COPY --from=patched /goaway-patched /usr/local/bin/goaway-patched
-COPY --from=baseline /src/linkerd/app/integration/src/data /src/linkerd/app/integration/src/data
+COPY --from=proxy-source /src/linkerd/app/integration/src/data /src/linkerd/app/integration/src/data
 COPY scripts/reproduce.py scripts/standalone.py ./scripts/
 COPY versions.json ./
 RUN mkdir /results && chown 65532:65532 /results
