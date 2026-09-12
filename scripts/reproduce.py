@@ -288,7 +288,7 @@ def collect():
     return summaries
 
 
-def verify(summaries, proxy_logs=None, authorities=None):
+def verify(summaries, proxy_logs=None, authorities=None, cases=None):
     rows, problems = [], []
     if proxy_logs is None:
         pods = json.loads((RESULTS / "pods.json").read_text())["items"]
@@ -298,7 +298,7 @@ def verify(summaries, proxy_logs=None, authorities=None):
         }
     if authorities is None:
         authorities = {name: f"grpc-{name}.{NAMESPACE}.svc.cluster.local:50052" for name, *_ in CASES}
-    for name, variant, server, disabled, policy in CASES:
+    for name, variant, server, disabled, policy in CASES if cases is None else cases:
         result = summaries[name]
         log = (RESULTS / (name + ".log")).read_text()
         metrics = (RESULTS / (name + ".prom")).read_text()

@@ -1,4 +1,4 @@
-"""Run all seven GOAWAY cases as local processes inside the Docker image."""
+"""Compare direct, baseline, and patched gRPC calls inside the Docker image."""
 
 import argparse
 import contextlib
@@ -36,7 +36,7 @@ def listening(port):
         return False
 
 
-def scenario(name, variant, disabled, directory):
+def scenario(name, variant, disabled, directory, client="java", server="go"):
     processes = []
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -50,17 +50,26 @@ def scenario(name, variant, disabled, directory):
             return process
 
         try:
-            start(["goaway-server", "-port", str(port)], name + "-server.log")
+            java = ["java", "-XX:ActiveProcessorCount=2", "-Xms32m", "-Xmx128m", "-cp", "/app/client.jar"]
+            server_command = (["goaway-server", "-port", str(port)] if server == "go" else
+                              java + ["repro.GoAwayServer", str(port)])
+            start(server_command, name + "-server.log")
             wait_for(lambda: listening(port), processes, 30)
-            start(["goaway-" + variant, name, "127.0.0.1:" + str(port), str(ready)], name + "-proxy.log")
-            wait_for(ready.is_file, processes, 30)
-            addresses = json.loads(ready.read_text())
+            addresses = {"outbound": "127.0.0.1:" + str(port), "authority": "direct"}
+            if variant != "direct":
+                start(["goaway-" + variant, name, addresses["outbound"], str(ready)], name + "-proxy.log")
+                wait_for(ready.is_file, processes, 30)
+                addresses = json.loads(ready.read_text())
             client_log = directory / (name + ".log")
-            start(["java", "-XX:ActiveProcessorCount=2", "-Xms32m", "-Xmx128m", "-jar", "/app/client.jar",
-                   addresses["outbound"], str(disabled).lower()], client_log.name)
+            client_command = ["goaway-client"] if client == "go" else java + ["repro.Reproduce"]
+            start(client_command + [addresses["outbound"], str(disabled).lower()], client_log.name)
             match = wait_for(lambda: re.search(r"^SUMMARY (.+)$", client_log.read_text(), re.M), processes, 150)
-            with urllib.request.urlopen("http://" + addresses["admin"] + "/metrics", timeout=10) as response:
-                (directory / (name + ".prom")).write_bytes(response.read())
+            for line in client_log.read_text().splitlines():
+                if line.startswith(("START ", "ATTEMPT ", "STREAM_CLOSED ", "RPC ", "SUMMARY ")):
+                    print(line, flush=True)
+            if variant != "direct":
+                with urllib.request.urlopen("http://" + addresses["admin"] + "/metrics", timeout=10) as response:
+                    (directory / (name + ".prom")).write_bytes(response.read())
             return json.loads(match[1]), addresses["authority"]
         finally:
             for process in reversed(processes):
@@ -77,30 +86,72 @@ def interrupt(_signum, _frame):
     raise KeyboardInterrupt
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", type=Path, default=Path("/results"))
-    args = parser.parse_args()
-    args.results.mkdir(parents=True, exist_ok=True)
-    directory = args.results / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + str(time.time_ns()))
+def execute(directory, client="java", server="go"):
     directory.mkdir()
     reproduce.RESULTS = directory
     summaries, authorities, proxy_logs = {}, {}, {}
-    signal.signal(signal.SIGTERM, interrupt)
     print("Results: " + str(directory), flush=True)
+    cases = reproduce.CASES if client == "java" else reproduce.CASES[:4]
     try:
-        for name, variant, _server, disabled, _policy in reproduce.CASES:
+        print(f"Running direct ({client} client -> {server} server)", flush=True)
+        direct, _ = scenario("direct", "direct", False, directory, client, server)
+        if not (direct["completed"] and direct["requests"] == direct["success"] == direct["attempts"] == 20
+                and direct["failed"] == direct["transparentRetries"] == 0):
+            raise RuntimeError("Direct calls failed or retried; inspect direct.log and direct-server.log")
+        for name, variant, _server, disabled, _policy in cases:
             print("Running " + name, flush=True)
-            summaries[name], authorities[name] = scenario(name, variant, disabled, directory)
+            summaries[name], authorities[name] = scenario(name, variant, disabled, directory, client, server)
             proxy_logs[name] = (directory / (name + "-proxy.log")).read_text()
-            print(json.dumps(summaries[name]), flush=True)
-        reproduce.verify(summaries, proxy_logs, authorities)
-        print("PASS: all seven conditions matched", flush=True)
+        reproduce.verify(summaries, proxy_logs, authorities, cases)
+        summary_path = directory / "summary.json"
+        summary = json.loads(summary_path.read_text())
+        summary.update(client=client, server=server, direct=direct)
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+        with (directory / "report.md").open("a") as report:
+            report.write(f"\nClient: {client}; server: {server}. Direct: 20/20 successful RPCs, no retries.\n")
+            report.write("\n| Case | Client | Server | Proxy | Metrics |\n|---|---|---|---|---|\n")
+            report.write("| direct | [log](direct.log) | [log](direct-server.log) | — | — |\n")
+            for name, *_ in cases:
+                report.write(f"| {name} | [log]({name}.log) | [log]({name}-server.log) | "
+                             f"[log]({name}-proxy.log) | [metrics]({name}.prom) |\n")
         return 0
     except (Exception, KeyboardInterrupt) as error:
         (directory / "error.txt").write_text(str(error) or "Interrupted")
         print("FAIL: " + (str(error) or "Interrupted"), file=sys.stderr)
         return 1
+
+
+def positive(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runs", type=positive, default=5)
+    parser.add_argument("--client", choices=("java", "go"), default="java")
+    parser.add_argument("--server", choices=("go", "java"), default="go")
+    parser.add_argument("--results", type=Path, default=Path("/results"))
+    args = parser.parse_args()
+    directory = args.results / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + str(time.time_ns()))
+    directory.mkdir(parents=True)
+    signal.signal(signal.SIGTERM, interrupt)
+    rows = ["| Run | Result | Logs and checks |", "|---|---|---|"]
+    for index in range(1, args.runs + 1):
+        name = f"run-{index:03d}"
+        print(f"Run {index}/{args.runs}", flush=True)
+        code = execute(directory / name, args.client, args.server)
+        status = "FAIL" if code else "PASS"
+        target = "error.txt" if code else "report.md"
+        rows.append(f"| {index} | {status} | [details]({name}/{target}) |")
+        (directory / "report.md").write_text("\n".join(rows) + "\n")
+        print(f"{status}: run {index}/{args.runs}; results: {directory / 'report.md'}", flush=True)
+        if code:
+            return code
+    print(f"PASS: {args.runs}/{args.runs} runs; all selected checks matched in each run", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

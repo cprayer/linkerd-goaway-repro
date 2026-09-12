@@ -8,17 +8,17 @@ import (
 	"net"
 	"time"
 
+	"example.com/linkerd-goaway-repro/server/rpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-type echoService interface {
-	UnaryEcho(context.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error)
+type echoServer struct {
+	rpc.UnimplementedEchoServer
+	delay time.Duration
 }
-
-type echoServer struct{ delay time.Duration }
 
 func (s echoServer) UnaryEcho(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 	log.Printf("ACCEPT message=%s", req.Value)
@@ -46,28 +46,7 @@ func main() {
 		MaxConnectionAgeGrace: time.Minute,
 		MaxConnectionIdle:     2 * time.Minute,
 	}))
-	server.RegisterService(&grpc.ServiceDesc{
-		ServiceName: "repro.Echo",
-		HandlerType: (*echoService)(nil),
-		Methods: []grpc.MethodDesc{{
-			MethodName: "UnaryEcho",
-			Handler: func(srv any, ctx context.Context, decode func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-				req := new(wrapperspb.StringValue)
-				if err := decode(req); err != nil {
-					return nil, err
-				}
-				handler := func(ctx context.Context, req any) (any, error) {
-					return srv.(echoService).UnaryEcho(ctx, req.(*wrapperspb.StringValue))
-				}
-				if interceptor == nil {
-					return handler(ctx, req)
-				}
-				return interceptor(ctx, req, &grpc.UnaryServerInfo{
-					Server: srv, FullMethod: "/repro.Echo/UnaryEcho",
-				}, handler)
-			},
-		}},
-	}, echoServer{delay: *delay})
+	rpc.RegisterEchoServer(server, echoServer{delay: *delay})
 	log.Printf("READY port=%d max_connection_age=%s response_delay=%s", *port, *age, *delay)
 	log.Fatal(server.Serve(listener))
 }

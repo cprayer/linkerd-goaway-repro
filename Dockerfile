@@ -8,8 +8,10 @@ FROM golang:1.25.1@sha256:d7098379b7da665ab25b99795465ec320b1ca9d4addb9f77409c48
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
 RUN go mod download
-COPY server/main.go ./
-RUN CGO_ENABLED=0 GOMAXPROCS=2 go build -p 2 -trimpath -o /server .
+COPY server/ ./
+RUN test -z "$(gofmt -l .)" && GOMAXPROCS=2 go test -p 2 ./... \
+    && CGO_ENABLED=0 GOMAXPROCS=2 go build -p 2 -trimpath -o /server . \
+    && CGO_ENABLED=0 GOMAXPROCS=2 go build -p 2 -trimpath -o /client ./cmd/client
 
 FROM rust:1.90@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS baseline
 WORKDIR /src
@@ -38,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
 COPY --from=java /opt/java/openjdk /opt/java/openjdk
 COPY --from=client /src/target/client.jar /app/client.jar
 COPY --from=server /server /usr/local/bin/goaway-server
+COPY --from=server /client /usr/local/bin/goaway-client
 COPY --from=baseline /goaway-baseline /usr/local/bin/goaway-baseline
 COPY --from=patched /goaway-patched /usr/local/bin/goaway-patched
 COPY --from=baseline /src/linkerd/app/integration/src/data /src/linkerd/app/integration/src/data
@@ -48,3 +51,4 @@ ENV PATH="/opt/java/openjdk/bin:$PATH" PYTHONUNBUFFERED=1 \
     LINKERD2_PROXY_LOG="linkerd=debug,warn" GRPC_GO_LOG_SEVERITY_LEVEL=info GRPC_GO_LOG_VERBOSITY_LEVEL=2
 USER 65532:65532
 ENTRYPOINT ["python3", "scripts/standalone.py"]
+CMD ["--runs", "5"]

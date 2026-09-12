@@ -55,6 +55,42 @@ class StandaloneTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exited unexpectedly"):
             standalone.wait_for(lambda: True, [SimpleNamespace(poll=lambda: 1)], 1)
 
+    def test_batch_repeats_and_stops_on_failure(self):
+        for codes in ([0, 0], [1]):
+            with self.subTest(codes=codes), tempfile.TemporaryDirectory() as directory, \
+                    patch("sys.argv", ["standalone.py", "--runs", "2", "--results", directory]), \
+                    patch.object(standalone, "execute", side_effect=codes) as execute, \
+                    patch.object(standalone.signal, "signal"), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(standalone.main(), codes[-1])
+                self.assertEqual(execute.call_count, len(codes))
+                paths = [call.args[0] for call in execute.call_args_list]
+                self.assertEqual(len(set(paths)), len(codes))
+                report = next(Path(directory).glob("*/report.md")).read_text()
+                self.assertIn("FAIL" if codes[-1] else "PASS", report)
+                self.assertIn("run-001/error.txt" if codes[-1] else "run-002/report.md", report)
+
+    def test_runs_must_be_positive(self):
+        for value in ("0", "-1", "invalid"):
+            with self.subTest(value=value), patch("sys.argv", ["standalone.py", "--runs", value]), \
+                    patch.object(standalone, "execute") as execute, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    standalone.main()
+                self.assertEqual(error.exception.code, 2)
+                execute.assert_not_called()
+
+    def test_failed_direct_control_stops_before_proxy_cases(self):
+        direct = dict(completed=True, requests=20, success=19, failed=1, attempts=20, transparentRetries=0)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(standalone, "scenario", return_value=(direct, "direct")) as scenario, \
+                patch.object(reproduce, "verify") as verify, \
+                patch.object(reproduce, "RESULTS", reproduce.RESULTS), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            root = Path(directory) / "run"
+            self.assertEqual(standalone.execute(root, "go", "java"), 1)
+            scenario.assert_called_once_with("direct", "direct", False, root, "go", "java")
+            verify.assert_not_called()
+            self.assertIn("Direct calls failed", (root / "error.txt").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

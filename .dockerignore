@@ -8,6 +8,14 @@
 !scripts/standalone.py
 !server/
 !server/main.go
+!server/main_test.go
+!server/rpc/
+!server/rpc/*.go
+!server/echo/
+!server/echo/*.go
+!server/cmd/
+!server/cmd/client/
+!server/cmd/client/*.go
 !server/go.mod
 !server/go.sum
 !client/
