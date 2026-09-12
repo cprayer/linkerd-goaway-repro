@@ -4,12 +4,18 @@ Compare baseline and patched Linkerd proxies using a grpc-java client and Go gRP
 
 ## Run
 
-Docker is the only prerequisite. Build and run with one command:
+Docker is the only prerequisite. The builder and reproduction container are each limited to
+**2 CPUs and 4 GiB RAM**, with swap disabled. The builder can be shared with `linkerd-replay-body-repro`.
 
 ```sh
-docker build -t linkerd-goaway-repro https://github.com/cprayer/linkerd-goaway-repro.git && \
-  docker run --name goaway-repro --network none --cpus 2 --memory 4g \
-    --cap-drop ALL --security-opt no-new-privileges linkerd-goaway-repro
+docker buildx inspect linkerd-replay-builder >/dev/null 2>&1 || \
+  docker buildx create --name linkerd-replay-builder --driver docker-container
+docker buildx inspect --bootstrap linkerd-replay-builder
+docker update --cpus 2 --memory 4g --memory-swap 4g buildx_buildkit_linkerd-replay-builder0
+docker buildx build --builder linkerd-replay-builder --load -t linkerd-goaway-repro \
+  https://github.com/cprayer/linkerd-goaway-repro.git && \
+docker run --name goaway-repro --network none --cpus 2 --memory 4g --memory-swap 4g \
+  --cap-drop ALL --security-opt no-new-privileges linkerd-goaway-repro
 ```
 
 The first build compiles both proxy revisions and the client/server from source. The container runs as a non-root user, without mounts or privileged mode. All traffic stays inside the container.
