@@ -288,16 +288,22 @@ def collect():
     return summaries
 
 
-def verify(summaries):
+def verify(summaries, proxy_logs=None, authorities=None):
     rows, problems = [], []
-    pods = json.loads((RESULTS / "pods.json").read_text())["items"]
+    if proxy_logs is None:
+        pods = json.loads((RESULTS / "pods.json").read_text())["items"]
+        proxy_logs = {
+            pod["metadata"]["labels"]["app"]: (RESULTS / (pod["metadata"]["name"] + "-linkerd-proxy.log")).read_text()
+            for pod in pods if pod["metadata"]["labels"].get("app") in summaries
+        }
+    if authorities is None:
+        authorities = {name: f"grpc-{name}.{NAMESPACE}.svc.cluster.local:50052" for name, *_ in CASES}
     for name, variant, server, disabled, policy in CASES:
         result = summaries[name]
         log = (RESULTS / (name + ".log")).read_text()
         metrics = (RESULTS / (name + ".prom")).read_text()
         valid = result["completed"] and result["requests"] == 20 and result["success"] + result["failed"] == 20
-        pod = next(p for p in pods if p["metadata"]["labels"].get("app") == name)
-        proxy_log = (RESULTS / (pod["metadata"]["name"] + "-linkerd-proxy.log")).read_text()
+        proxy_log = proxy_logs[name]
         valid &= "release 0.0.0-goaway." + VERSIONS[variant][:12] in proxy_log
         if variant == "baseline":
             valid &= result["failed"] > 0 and result["transparentRetries"] == 0
@@ -319,7 +325,7 @@ def verify(summaries):
             valid &= any('error="REFUSED"' in line and float(line.rsplit(" ", 1)[1]) > 0 for line in metrics.splitlines())
         if server != "plain":
             valid &= any(line.startswith("tcp_open_total") and 'peer="dst"' in line and 'tls="true"' in line
-                         and f'authority="grpc-{name}.{NAMESPACE}.svc.cluster.local:50052"' in line
+                         and f'authority="{authorities[name]}"' in line
                          and float(line.rsplit(" ", 1)[1]) > 0 for line in metrics.splitlines())
         rows.append(f"| {name} | {result['success']}/20 | {result['failed']} | {result['transparentRetries']} | {'PASS' if valid else 'FAIL'} |")
         if not valid:

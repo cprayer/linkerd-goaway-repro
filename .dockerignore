@@ -1,0 +1,16 @@
+*
+!Dockerfile
+!versions.json
+!harness/
+!harness/goaway.rs
+!scripts/
+!scripts/reproduce.py
+!scripts/standalone.py
+!server/
+!server/main.go
+!server/go.mod
+!server/go.sum
+!client/
+!client/pom.xml
+!client/src/
+!client/src/**
